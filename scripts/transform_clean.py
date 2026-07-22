@@ -74,6 +74,40 @@ def parse_raw_file(filepath):
     return rows
 
 
+def clean_dataframe(df):
+    """Nettoyage et normalisation du jeu de donnees avant ecriture."""
+    initial_count = len(df)
+
+    # Lignes incompletes : ville ou horodatage manquant
+    df = df.dropna(subset=["ville", "timestamp_utc"])
+
+    # Normaliser les timestamps UTC et tronquer a l'heure (collecte horaire)
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+    df["timestamp_utc"] = df["timestamp_utc"].dt.floor("h")
+
+    # AQI OpenWeatherMap : entier de 1 (bon) a 5 (tres mauvais)
+    df["aqi"] = pd.to_numeric(df["aqi"], errors="coerce")
+    invalid_aqi = df["aqi"].notna() & ~df["aqi"].between(1, 5)
+    if invalid_aqi.any():
+        print(f"[WARN] {invalid_aqi.sum()} ligne(s) avec AQI hors plage 1-5, valeurs mises a NaN.")
+        df.loc[invalid_aqi, "aqi"] = pd.NA
+
+    for key in POLLUTANT_KEYS:
+        df[key] = pd.to_numeric(df[key], errors="coerce")
+
+    # Deduplication : meme ville + meme heure => une seule ligne
+    # On garde la derniere valeur rencontree (en cas de recollecte ou backfill)
+    df = df.drop_duplicates(subset=["ville", "timestamp_utc"], keep="last")
+
+    df = df.sort_values(by=["timestamp_utc", "ville"]).reset_index(drop=True)
+
+    dropped = initial_count - len(df)
+    if dropped:
+        print(f"Nettoyage : {dropped} ligne(s) supprimee(s) ou fusionnee(s).")
+
+    return df
+
+
 def build_clean():
     pattern = str(RAW_DIR / "*" / "*.json")
     raw_files = glob.glob(pattern)
@@ -94,13 +128,11 @@ def build_clean():
         return
 
     df = pd.DataFrame(all_rows)
+    df = clean_dataframe(df)
 
-    # Deduplication : meme ville + meme timestamp = une seule ligne
-    # On garde la derniere valeur rencontree (en cas de recollecte)
-    df = df.drop_duplicates(subset=["ville", "timestamp_utc"], keep="last")
-
-    # Tri chronologique, puis par ville pour la lisibilite
-    df = df.sort_values(by=["timestamp_utc", "ville"]).reset_index(drop=True)
+    if df.empty:
+        print("Aucune ligne valide apres nettoyage.")
+        return
 
     CLEAN_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(CLEAN_FILE, index=False)
