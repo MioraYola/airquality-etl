@@ -2,7 +2,7 @@ name: AQI Pipeline
 
 permissions: 
   contents: write
-  
+
 on:
   schedule:
     - cron: "0 * * * *"   
@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout du repo
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Installer Python
         uses: actions/setup-python@v5
@@ -39,4 +41,8 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add raw/ clean/
           git diff --staged --quiet || git commit -m "Donnees AQI automatiques - $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push
+      - name: Vérifier le dépôt distant
+        run: |
+          git remote -v
+          git branch
+          git push origin HEAD:${{ github.ref }}
