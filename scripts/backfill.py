@@ -1,7 +1,7 @@
 """
 Backfill historique de la qualite de l'air (OpenWeatherMap Air Pollution History API).
 Rejouable : peut etre relance sans creer de doublons (les fichiers sont nommes
-par ville + jour, un nouvel appel ecrase juste le fichier du meme jour).
+par ville + jour).
 
 Usage:
     python backfill.py --months 3
