@@ -2,12 +2,17 @@
 Backfill historique de la qualité de l'air
 (OpenWeatherMap Air Pollution History API).
 
-Le script récupère les données horaires complètes pour chaque ville
+Le script récupère les données horaires pour chaque ville
 et chaque journée.
 
-Le script est rejouable :
-un fichier RAW est créé par ville et par jour.
-Si le script est relancé, le fichier correspondant est simplement remplacé.
+Principes :
+- une journée complète contient normalement 24 observations ;
+- une journée partielle (ex. 23/24) est conservée avec un avertissement ;
+- une journée avec 0 observation est considérée comme une erreur ;
+- les timestamps dupliqués sont refusés ;
+- les dates sont traitées en UTC ;
+- un fichier RAW est créé par ville et par jour ;
+- --start et --end sont inclusifs.
 
 Exemples :
 
@@ -16,7 +21,6 @@ Exemples :
     py scripts/backfill.py \
         --start 2026-05-01 \
         --end 2026-07-29
-
 """
 
 import os
@@ -29,13 +33,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 load_dotenv(
     BASE_DIR / ".env",
     override=True
 )
-
 
 RAW_DIR = Path(
     os.environ.get(
@@ -44,7 +52,6 @@ RAW_DIR = Path(
     )
 )
 
-
 CONFIG_PATH = Path(
     os.environ.get(
         "CITIES_CONFIG",
@@ -52,34 +59,31 @@ CONFIG_PATH = Path(
     )
 )
 
-
 API_KEY = os.environ.get("OWM_API_KEY")
-
 
 BASE_URL = (
     "https://api.openweathermap.org/"
     "data/2.5/air_pollution/history"
 )
 
-
+# Limitation API
 REQUEST_DELAY_SECONDS = 1.1
 
-
-# Nombre maximum de tentatives
+# Retry en cas d'erreur réseau ou réponse inutilisable
 MAX_RETRIES = 3
-
-
-# Attente progressive entre les retries :
-# 5 s, 10 s, 15 s
 RETRY_BACKOFF_SECONDS = 5
 
-
-# Une journée UTC complète doit contenir 24 observations
+# Nombre théorique d'heures dans une journée
 EXPECTED_OBSERVATIONS_PER_DAY = 24
+
+
+# ============================================================
+# CHARGEMENT DES VILLES
+# ============================================================
 
 def load_cities():
     """
-    Charge la configuration des villes depuis cities.json.
+    Charge les villes depuis config/cities.json.
     """
 
     with open(
@@ -87,9 +91,12 @@ def load_cities():
         "r",
         encoding="utf-8"
     ) as f:
-
         return json.load(f)
 
+
+# ============================================================
+# VALIDATION DE LA RÉPONSE
+# ============================================================
 
 def validate_day_payload(
     payload,
@@ -97,74 +104,60 @@ def validate_day_payload(
     day_end
 ):
     """
-    Vérifie que la réponse API correspond à une journée horaire complète.
+    Vérifie la cohérence des données reçues.
 
-    Une journée valide doit avoir :
-    - une clé "list"
-    - exactement 24 observations
-    - exactement 24 timestamps uniques
-    - uniquement des timestamps appartenant au jour demandé
+    Une journée partielle est acceptée.
+
+    Refus uniquement si :
+    - aucune observation ;
+    - observation sans timestamp ;
+    - timestamps dupliqués ;
+    - timestamp hors de la journée demandée.
+
+    Retourne le nombre d'observations reçues.
     """
 
     observations = payload.get("list", [])
 
-
     # --------------------------------------------------------
-    # Vérification du nombre d'observations
+    # Aucune donnée
     # --------------------------------------------------------
 
-    if len(observations) != EXPECTED_OBSERVATIONS_PER_DAY:
-
+    if len(observations) == 0:
         raise ValueError(
-            f"Jour incomplet : "
-            f"{len(observations)} observations reçues "
-            f"au lieu de "
-            f"{EXPECTED_OBSERVATIONS_PER_DAY}"
+            "Aucune observation reçue pour cette journée"
         )
 
+    # --------------------------------------------------------
+    # Timestamps
+    # --------------------------------------------------------
+
+    timestamps = []
+
+    for item in observations:
+
+        if "dt" not in item:
+            raise ValueError(
+                "Une observation ne possède pas de timestamp 'dt'"
+            )
+
+        timestamps.append(item["dt"])
 
     # --------------------------------------------------------
-    # Récupération des timestamps
+    # Doublons
     # --------------------------------------------------------
 
-    timestamps = [
-        item.get("dt")
-        for item in observations
-        if item.get("dt") is not None
-    ]
-
-
-    if len(timestamps) != EXPECTED_OBSERVATIONS_PER_DAY:
-
+    if len(timestamps) != len(set(timestamps)):
         raise ValueError(
-            "Certaines observations ne possèdent pas de timestamp dt"
+            "Timestamps dupliqués dans la réponse API"
         )
 
-
     # --------------------------------------------------------
-    # Vérification des doublons temporels
-    # --------------------------------------------------------
-
-    unique_timestamps = set(timestamps)
-
-
-    if len(unique_timestamps) != EXPECTED_OBSERVATIONS_PER_DAY:
-
-        raise ValueError(
-            f"Timestamps dupliqués : "
-            f"{len(unique_timestamps)} heures uniques "
-            f"au lieu de 24"
-        )
-
-
-    # --------------------------------------------------------
-    # Vérifier que toutes les données appartiennent au jour
-    # demandé
+    # Vérification de la période
     # --------------------------------------------------------
 
     start_ts = int(day_start.timestamp())
     end_ts = int(day_end.timestamp())
-
 
     invalid_timestamps = [
         ts
@@ -172,16 +165,39 @@ def validate_day_payload(
         if ts < start_ts or ts > end_ts
     ]
 
-
     if invalid_timestamps:
-
         raise ValueError(
             f"{len(invalid_timestamps)} observation(s) "
             f"hors de la journée demandée"
         )
 
+    # --------------------------------------------------------
+    # Journée partielle
+    # --------------------------------------------------------
 
-    return True
+    count = len(observations)
+
+    if count < EXPECTED_OBSERVATIONS_PER_DAY:
+
+        print(
+            f"  [WARN] Journée incomplète : "
+            f"{count}/{EXPECTED_OBSERVATIONS_PER_DAY} "
+            f"observations disponibles"
+        )
+
+    elif count > EXPECTED_OBSERVATIONS_PER_DAY:
+
+        print(
+            f"  [WARN] Nombre inhabituel : "
+            f"{count} observations reçues"
+        )
+
+    return count
+
+
+# ============================================================
+# APPEL API
+# ============================================================
 
 def fetch_day(
     lat,
@@ -190,17 +206,16 @@ def fetch_day(
     day_end
 ):
     """
-    Récupère les données d'une journée.
+    Récupère les données pour une journée.
 
-    Effectue plusieurs tentatives en cas :
-    - timeout
-    - erreur réseau
-    - coupure SSL
-    - réponse journalière incomplète
+    Retry en cas de :
+    - timeout ;
+    - problème réseau ;
+    - réponse sans données ;
+    - données incohérentes.
     """
 
     last_error = None
-
 
     for attempt in range(
         1,
@@ -221,34 +236,23 @@ def fetch_day(
                 "appid": API_KEY,
             }
 
-
             response = requests.get(
                 BASE_URL,
                 params=params,
                 timeout=20
             )
 
-
             response.raise_for_status()
-
 
             payload = response.json()
 
-
-            # Vérification de la journée
-            validate_day_payload(
+            observation_count = validate_day_payload(
                 payload,
                 day_start,
                 day_end
             )
 
-
-            return payload
-
-
-        # ----------------------------------------------------
-        # Erreurs réseau
-        # ----------------------------------------------------
+            return payload, observation_count
 
         except (
             requests.exceptions.ConnectionError,
@@ -259,7 +263,6 @@ def fetch_day(
 
             last_error = e
 
-
             if attempt < MAX_RETRIES:
 
                 wait = (
@@ -267,38 +270,20 @@ def fetch_day(
                     * attempt
                 )
 
-
                 print(
-                    f"  [RETRY "
-                    f"{attempt}/{MAX_RETRIES}] "
+                    f"  [RETRY {attempt}/{MAX_RETRIES}] "
                     f"{e}"
                 )
 
-
                 print(
-                    f"  Nouvelle tentative "
-                    f"dans {wait}s..."
+                    f"  Nouvelle tentative dans {wait}s..."
                 )
-
 
                 time.sleep(wait)
 
-
-        # ----------------------------------------------------
-        # Erreur HTTP
-        # ----------------------------------------------------
-
-        except requests.exceptions.HTTPError as e:
-
-            # Exemple :
-            # 401 clé invalide
-            # 429 quota
-            # etc.
-
-            raise e
-
-
-    # Si toutes les tentatives échouent
+        except requests.exceptions.HTTPError:
+            # 401, 403, 429, etc.
+            raise
 
     raise last_error
 
@@ -313,12 +298,10 @@ def save_raw(
     payload
 ):
     """
-    Enregistre un fichier JSON RAW pour une ville et une journée.
+    Enregistre un JSON par ville et par journée.
 
     Exemple :
-
-    raw/Paris/
-        Paris_history_2026-05-01.json
+    raw/Paris/Paris_history_2026-05-01.json
     """
 
     ville_dir = (
@@ -326,12 +309,10 @@ def save_raw(
         / ville.replace(" ", "_")
     )
 
-
     ville_dir.mkdir(
         parents=True,
         exist_ok=True
     )
-
 
     filename = (
         f"{ville.replace(' ', '_')}"
@@ -340,12 +321,10 @@ def save_raw(
         f".json"
     )
 
-
     filepath = (
         ville_dir
         / filename
     )
-
 
     with open(
         filepath,
@@ -360,7 +339,6 @@ def save_raw(
             indent=2
         )
 
-
     return filepath
 
 
@@ -373,11 +351,10 @@ def daterange(
     end
 ):
     """
-    Génère les journées de start à end inclusivement.
+    Génère toutes les journées entre start et end inclusivement.
     """
 
     current = start
-
 
     while current <= end:
 
@@ -387,17 +364,13 @@ def daterange(
 
 
 # ============================================================
-# BACKFILL
+# BACKFILL PRINCIPAL
 # ============================================================
 
 def run_backfill(
     start_date,
     end_date
 ):
-    """
-    Exécute le backfill pour toutes les villes
-    entre start_date et end_date inclusivement.
-    """
 
     if not API_KEY:
 
@@ -406,25 +379,21 @@ def run_backfill(
             "dans l'environnement"
         )
 
-
     cities = load_cities()
-
 
     total_files = 0
     total_errors = 0
+    total_observations = 0
 
-
+    incomplete_days = []
     failed_days = []
-
 
     for city in cities:
 
         ville = city["ville"]
 
-
         print(
-            "\n"
-            "========================================"
+            "\n========================================"
         )
 
         print(
@@ -435,15 +404,13 @@ def run_backfill(
             "========================================"
         )
 
-
         for day in daterange(
             start_date,
             end_date
         ):
 
-
             # ------------------------------------------------
-            # Début de journée UTC
+            # Début de la journée : 00:00:00 UTC
             # ------------------------------------------------
 
             day_start = day.replace(
@@ -454,11 +421,8 @@ def run_backfill(
                 tzinfo=timezone.utc
             )
 
-
             # ------------------------------------------------
-            # Fin de journée UTC
-            #
-            # 23:59:59 au lieu du lendemain 00:00
+            # Fin : 23:59:59 UTC
             # ------------------------------------------------
 
             day_end = (
@@ -467,19 +431,20 @@ def run_backfill(
                 - timedelta(seconds=1)
             )
 
-
             try:
 
-                data = fetch_day(
+                (
+                    data,
+                    observation_count
+                ) = fetch_day(
                     city["lat"],
                     city["lon"],
                     day_start,
                     day_end
                 )
 
-
                 # --------------------------------------------
-                # Métadonnées ajoutées au RAW
+                # Métadonnées
                 # --------------------------------------------
 
                 data["_meta"] = {
@@ -488,16 +453,14 @@ def run_backfill(
                     "lat": city["lat"],
                     "lon": city["lon"],
                     "date_backfill": (
-                        day.strftime(
-                            "%Y-%m-%d"
-                        )
+                        day.strftime("%Y-%m-%d")
                     ),
-                    "timezone": "UTC"
+                    "timezone": "UTC",
+                    "observations": observation_count
                 }
 
-
                 # --------------------------------------------
-                # Sauvegarde
+                # Sauvegarde RAW
                 # --------------------------------------------
 
                 path = save_raw(
@@ -506,33 +469,53 @@ def run_backfill(
                     data
                 )
 
-
                 total_files += 1
+                total_observations += observation_count
 
+                # --------------------------------------------
+                # Journée incomplète
+                # --------------------------------------------
 
-                print(
-                    f"[OK] "
-                    f"{ville} "
-                    f"{day.strftime('%Y-%m-%d')} "
-                    f"-> 24 observations"
-                )
+                if (
+                    observation_count
+                    < EXPECTED_OBSERVATIONS_PER_DAY
+                ):
 
+                    incomplete_days.append(
+                        (
+                            ville,
+                            day.strftime("%Y-%m-%d"),
+                            observation_count
+                        )
+                    )
+
+                    print(
+                        f"[OK PARTIEL] "
+                        f"{ville} "
+                        f"{day.strftime('%Y-%m-%d')} "
+                        f"-> {observation_count}/24 observations"
+                    )
+
+                else:
+
+                    print(
+                        f"[OK] "
+                        f"{ville} "
+                        f"{day.strftime('%Y-%m-%d')} "
+                        f"-> {observation_count} observations"
+                    )
 
             except Exception as e:
 
                 total_errors += 1
 
-
                 failed_days.append(
                     (
                         ville,
-                        day.strftime(
-                            "%Y-%m-%d"
-                        ),
+                        day.strftime("%Y-%m-%d"),
                         str(e)
                     )
                 )
-
 
                 print(
                     f"[ERREUR] "
@@ -541,21 +524,18 @@ def run_backfill(
                     f": {e}"
                 )
 
-
             finally:
 
                 time.sleep(
                     REQUEST_DELAY_SECONDS
                 )
 
-
     # ========================================================
     # RÉSUMÉ
     # ========================================================
 
     print(
-        "\n"
-        "========================================"
+        "\n========================================"
     )
 
     print(
@@ -566,25 +546,53 @@ def run_backfill(
         "========================================"
     )
 
-
     print(
-        f"Fichiers valides écrits : "
-        f"{total_files}"
+        f"Fichiers écrits       : {total_files}"
     )
 
-
     print(
-        f"Jours en erreur : "
-        f"{total_errors}"
+        f"Observations récupérées : {total_observations}"
     )
 
+    print(
+        f"Jours incomplets      : {len(incomplete_days)}"
+    )
+
+    print(
+        f"Jours en erreur       : {total_errors}"
+    )
+
+    # --------------------------------------------------------
+    # Journées incomplètes
+    # --------------------------------------------------------
+
+    if incomplete_days:
+
+        print(
+            "\nJournées incomplètes conservées :"
+        )
+
+        for (
+            ville,
+            jour,
+            count
+        ) in incomplete_days:
+
+            print(
+                f"  - {ville} "
+                f"{jour} : "
+                f"{count}/24 observations"
+            )
+
+    # --------------------------------------------------------
+    # Journées réellement en erreur
+    # --------------------------------------------------------
 
     if failed_days:
 
         print(
-            "\nJours en échec :"
+            "\nJournées non récupérées :"
         )
-
 
         for (
             ville,
@@ -593,25 +601,15 @@ def run_backfill(
         ) in failed_days:
 
             print(
-                f"  - "
-                f"{ville} "
-                f"{jour} "
-                f": {erreur}"
+                f"  - {ville} "
+                f"{jour} : "
+                f"{erreur}"
             )
 
+    if not failed_days:
 
         print(
-            "\nRelance uniquement "
-            "les jours concernés "
-            "avec --start et --end."
-        )
-
-
-    else:
-
-        print(
-            "\nTous les jours ont été "
-            "récupérés correctement."
+            "\nAucune journée totalement absente."
         )
 
 
@@ -628,7 +626,6 @@ if __name__ == "__main__":
         )
     )
 
-
     parser.add_argument(
         "--months",
         type=int,
@@ -639,7 +636,6 @@ if __name__ == "__main__":
         )
     )
 
-
     parser.add_argument(
         "--start",
         type=str,
@@ -649,7 +645,6 @@ if __name__ == "__main__":
             "(incluse)"
         )
     )
-
 
     parser.add_argument(
         "--end",
@@ -662,9 +657,7 @@ if __name__ == "__main__":
         )
     )
 
-
     args = parser.parse_args()
-
 
     # ========================================================
     # DATE DE FIN
@@ -681,14 +674,10 @@ if __name__ == "__main__":
 
     else:
 
-        # On utilise hier plutôt qu'aujourd'hui
-        # afin d'éviter une journée historique incomplète.
-
         yesterday = (
             datetime.now(timezone.utc)
             - timedelta(days=1)
         )
-
 
         end_date = yesterday.replace(
             hour=0,
@@ -696,7 +685,6 @@ if __name__ == "__main__":
             second=0,
             microsecond=0
         )
-
 
     # ========================================================
     # DATE DE DÉBUT
@@ -711,19 +699,11 @@ if __name__ == "__main__":
             tzinfo=timezone.utc
         )
 
-
     else:
 
         number_of_days = (
             30 * args.months
         )
-
-
-        # -1 car start et end sont inclusifs.
-        #
-        # Exemple :
-        # 90 jours complets
-        # = end - 89 jours → end inclus.
 
         start_date = (
             end_date
@@ -732,38 +712,36 @@ if __name__ == "__main__":
             )
         )
 
-
     # ========================================================
-    # VALIDATION
+    # VALIDATION DES DATES
     # ========================================================
 
     if start_date > end_date:
 
         raise ValueError(
             "La date de début doit être "
-            "antérieure ou égale "
-            "à la date de fin."
+            "antérieure ou égale à la date de fin."
         )
-
 
     expected_days = (
         end_date.date()
         - start_date.date()
     ).days + 1
 
-
     cities = load_cities()
-
 
     expected_files = (
         expected_days
         * len(cities)
     )
 
+    expected_observations = (
+        expected_files
+        * EXPECTED_OBSERVATIONS_PER_DAY
+    )
 
     print(
-        "\n"
-        "========================================"
+        "\n========================================"
     )
 
     print(
@@ -774,7 +752,6 @@ if __name__ == "__main__":
         "========================================"
     )
 
-
     print(
         f"Période : "
         f"{start_date.date()} "
@@ -783,29 +760,26 @@ if __name__ == "__main__":
         f"(inclus)"
     )
 
-
     print(
-        f"Nombre de jours : "
-        f"{expected_days}"
+        f"Nombre de jours : {expected_days}"
     )
 
-
     print(
-        f"Nombre de villes : "
-        f"{len(cities)}"
+        f"Nombre de villes : {len(cities)}"
     )
 
-
     print(
-        f"Fichiers attendus : "
-        f"{expected_files}"
+        f"Fichiers attendus : {expected_files}"
     )
 
+    print(
+        f"Observations théoriques maximum : "
+        f"{expected_observations}"
+    )
 
     print(
         "Fuseau horaire : UTC"
     )
-
 
     run_backfill(
         start_date,
