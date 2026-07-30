@@ -97,9 +97,11 @@ def save_raw(ville, day, payload):
     ville_dir = RAW_DIR / ville.replace(" ", "_")
     ville_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"{ville.replace(' ', '_')}"
-                f"_history_{day.strftime('%Y-%m-%d')}"
-                f"_{collected_at.strftime('%Y%m%dT%H%M%SZ')}".json"
+    filename = (
+    f"{ville.replace(' ', '_')}"
+    f"_history_{day.strftime('%Y-%m-%d')}"
+    f"_{collected_at.strftime('%Y%m%dT%H%M%SZ')}.json"
+)
     filepath = ville_dir / filename
 
     with open(filepath, "w", encoding="utf-8") as f:
