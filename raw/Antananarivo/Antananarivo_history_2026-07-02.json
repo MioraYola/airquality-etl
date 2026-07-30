@@ -387,28 +387,15 @@
         "nh3": 3.46
       },
       "dt": 1783033200
-    },
-    {
-      "main": {
-        "aqi": 2
-      },
-      "components": {
-        "co": 297.7,
-        "no": 0,
-        "no2": 2.82,
-        "o3": 32.14,
-        "so2": 0.64,
-        "pm2_5": 16.16,
-        "pm10": 22,
-        "nh3": 3.02
-      },
-      "dt": 1783036800
     }
   ],
   "_meta": {
     "ville": "Antananarivo",
     "pays": "MG",
     "lat": -18.8792,
-    "lon": 47.5079
+    "lon": 47.5079,
+    "date_backfill": "2026-07-02",
+    "timezone": "UTC",
+    "observations": 24
   }
 }

@@ -25,6 +25,9 @@
     "ville": "Paris",
     "pays": "FR",
     "lat": 48.8566,
-    "lon": 2.3522
+    "lon": 2.3522,
+    "date_backfill": "2026-05-19",
+    "timezone": "UTC",
+    "observations": 1
   }
 }
