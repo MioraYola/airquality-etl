@@ -170,7 +170,7 @@ def insert_fact(cursor, row, city_id, datetime_id):
     )
 
 
-def load_warehouse():
+def run_load():
     if not CLEAN_FILE.exists():
         raise FileNotFoundError(f"Fichier clean introuvable : {CLEAN_FILE}")
 
@@ -228,4 +228,4 @@ def load_warehouse():
 
 
 if __name__ == "__main__":
-    load_warehouse()
+    run_load()
