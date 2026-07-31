@@ -74,3 +74,14 @@ python scripts/backfill.py --start 2025-07-01 --end 2026-07-01
 Pour chaque mesure horaire :
 - **AQI** : Air Quality Index (1-5)
 - **8 polluants** : CO, NO, NO2, O3, SO2, PM2.5, PM10, NH3
+## trous connus
+
+New York : 8 fois
+
+Sydney : 8 fois
+
+Tokyo : 8 fois
+
+Antananarivo : 6 fois
+
+Paris : 6 fois
