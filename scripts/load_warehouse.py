@@ -29,24 +29,15 @@ CLEAN_FILE = Path(
     )
 )
 
-DB_HOST = os.environ.get("DB_HOST", "localhost")
-DB_PORT = os.environ.get("DB_PORT", "5432")
-DB_NAME = os.environ.get("DB_NAME", "airquality_dw")
-DB_USER = os.environ.get("DB_USER", "postgres")
-DB_PASSWORD = os.environ.get("DB_PASSWORD")
-
+DB_URL = os.environ.get("WAREHOUSE_DB_URL")
 
 def get_connection():
-    if not DB_PASSWORD:
-        raise RuntimeError("DB_PASSWORD n'est pas defini dans le fichier .env")
+    if not DB_URL:
+        raise RuntimeError(
+            "WAREHOUSE_DB_URL n'est pas définie dans les variables d'environnement"
+        )
 
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
+    return psycopg2.connect(DB_URL)
 
 
 def get_or_create_city(cursor, ville, pays, latitude, longitude):

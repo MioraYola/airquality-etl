@@ -30,11 +30,7 @@ jobs:
       - name: Lancer le pipeline (extract -> transform -> load)
         env:
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_PORT: ${{ secrets.DB_PORT }}
-          DB_NAME: ${{ secrets.DB_NAME }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          WAREHOUSE_DB_URL: ${{ secrets.WAREHOUSE_DB_URL }}
           RAW_DIR: ${{ github.workspace }}/raw
           CLEAN_DIR: ${{ github.workspace }}/clean
           CITIES_CONFIG: ${{ github.workspace }}/config/cities.json
