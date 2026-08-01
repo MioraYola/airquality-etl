@@ -3,24 +3,23 @@ Charge clean/clean.csv dans le Data Warehouse (schema en etoile).
 Rejouable : les dimensions sont chargees en "upsert", la table de faits
 est reconstruite entierement a partir de clean.csv a chaque execution.
 
-Necessite la variable d'environnement WAREHOUSE_DB_URL
-(format: postgresql://user:password@host:port/dbname)
 
-OPTIMISATION : tous les upserts sont faits en une seule requete groupee
-(psycopg2.extras.execute_values) au lieu d'un aller-retour reseau par ligne.
-Important car le warehouse est heberge a distance (Supabase, eu-west-1) :
-avec des centaines/milliers de lignes, des inserts un par un font
-exploser le temps d'execution au fil des runs (clean.csv grossit a
-chaque extraction horaire).
+OPTIMISATION : 
+- Les dimensions sont chargées en batch avec execute_values()
+- Les IDs sont récupérés en une seule requête
+- Les faits sont insérés en batch
+
+Adapté pour un warehouse distant (Supabase PostgreSQL).
 """
 import os
 import pandas as pd
 import psycopg2
 from pathlib import Path
 from dotenv import load_dotenv
+from psycopg2.extras import execute_values
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(BASE_DIR / ".env", override=True)
+load_dotenv(BASE_DIR / ".env")
 
 CLEAN_FILE = Path(
     os.environ.get(
@@ -40,56 +39,100 @@ def get_connection():
     return psycopg2.connect(DB_URL)
 
 
-def get_or_create_city(cursor, ville, pays, latitude, longitude):
-    cursor.execute(
-        """
-        INSERT INTO dim_city (ville, pays, latitude, longitude)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (ville, pays) DO UPDATE
-        SET latitude = EXCLUDED.latitude,
-            longitude = EXCLUDED.longitude
-        RETURNING city_id;
-        """,
-        (ville, pays, latitude, longitude)
+def load_cities(cursor, df):
+
+    cities = (
+        df[
+            [
+                "ville",
+                "pays",
+                "latitude",
+                "longitude"
+            ]
+        ]
+        .drop_duplicates()
     )
 
-    result = cursor.fetchone()
 
-    if result:
-        return result[0]
-
-    cursor.execute(
+    execute_values(
+        cursor,
         """
-        SELECT city_id
-        FROM dim_city
-        WHERE ville = %s AND pays = %s;
-        """,
-        (ville, pays)
-    )
-
-    return cursor.fetchone()[0]
-
-
-def get_or_create_datetime(cursor, timestamp_utc):
-    date_only = timestamp_utc.date()
-    hour = timestamp_utc.hour
-    day = timestamp_utc.day
-    month = timestamp_utc.month
-    year = timestamp_utc.year
-    weekday = timestamp_utc.day_name()
-
-    cursor.execute(
-        """
-        INSERT INTO dim_datetime (
-            timestamp_utc, date_only, hour, day, month, year, weekday
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (timestamp_utc) DO UPDATE
-        SET date_only = EXCLUDED.date_only
-        RETURNING datetime_id;
-        """,
+        INSERT INTO dim_city
         (
-            timestamp_utc.to_pydatetime(),
+            ville,
+            pays,
+            latitude,
+            longitude
+        )
+        VALUES %s
+
+        ON CONFLICT(ville,pays)
+        DO UPDATE SET
+            latitude = EXCLUDED.latitude,
+            longitude = EXCLUDED.longitude;
+        """,
+
+        cities.values.tolist()
+    )
+
+
+    cursor.execute(
+        """
+        SELECT
+            city_id,
+            ville,
+            pays
+        FROM dim_city;
+        """
+    )
+
+
+    rows = cursor.fetchall()
+
+
+    city_map = {
+        (ville,pays): city_id
+        for city_id,ville,pays in rows
+    }
+
+
+    return city_map
+
+
+
+def load_datetimes(cursor, df):
+
+    timestamps = (
+        df["timestamp_utc"]
+        .drop_duplicates()
+    )
+
+
+    data = []
+
+
+    for ts in timestamps:
+
+        data.append(
+            (
+                ts.to_pydatetime(),
+                ts.date(),
+                ts.hour,
+                ts.day,
+                ts.month,
+                ts.year,
+                ts.day_name()
+            )
+        )
+
+
+    execute_values(
+        cursor,
+
+        """
+        INSERT INTO dim_datetime
+        (
+            timestamp_utc,
             date_only,
             hour,
             day,
@@ -97,29 +140,84 @@ def get_or_create_datetime(cursor, timestamp_utc):
             year,
             weekday
         )
-    )
 
-    result = cursor.fetchone()
+        VALUES %s
 
-    if result:
-        return result[0]
-
-    cursor.execute(
-        """
-        SELECT datetime_id
-        FROM dim_datetime
-        WHERE timestamp_utc = %s;
+        ON CONFLICT(timestamp_utc)
+        DO NOTHING;
         """,
-        (timestamp_utc.to_pydatetime(),)
+
+        data
     )
 
-    return cursor.fetchone()[0]
 
-
-def insert_fact(cursor, row, city_id, datetime_id):
     cursor.execute(
         """
-        INSERT INTO fact_air_quality (
+        SELECT
+            datetime_id,
+            timestamp_utc
+        FROM dim_datetime;
+        """
+    )
+
+
+    rows = cursor.fetchall()
+
+
+    datetime_map = {
+        timestamp: datetime_id
+        for datetime_id,timestamp in rows
+    }
+
+
+    return datetime_map
+
+
+def load_facts(cursor, df, city_map, datetime_map):
+
+
+    facts = []
+
+
+    for _, row in df.iterrows():
+
+        city_id = city_map[
+            (
+                row["ville"],
+                row["pays"]
+            )
+        ]
+
+
+        datetime_id = datetime_map[
+            row["timestamp_utc"].to_pydatetime()
+        ]
+
+
+        facts.append(
+            (
+                city_id,
+                datetime_id,
+
+                row["aqi"],
+                row["co"],
+                row["no"],
+                row["no2"],
+                row["o3"],
+                row["so2"],
+                row["pm2_5"],
+                row["pm10"],
+                row["nh3"]
+            )
+        )
+
+
+    execute_values(
+        cursor,
+
+        """
+        INSERT INTO fact_air_quality
+        (
             city_id,
             datetime_id,
             aqi,
@@ -132,9 +230,14 @@ def insert_fact(cursor, row, city_id, datetime_id):
             pm10,
             nh3
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (city_id, datetime_id) DO UPDATE
-        SET
+
+        VALUES %s
+
+
+        ON CONFLICT(city_id,datetime_id)
+
+        DO UPDATE SET
+
             aqi = EXCLUDED.aqi,
             co = EXCLUDED.co,
             no = EXCLUDED.no,
@@ -144,21 +247,14 @@ def insert_fact(cursor, row, city_id, datetime_id):
             pm2_5 = EXCLUDED.pm2_5,
             pm10 = EXCLUDED.pm10,
             nh3 = EXCLUDED.nh3;
+
         """,
-        (
-            city_id,
-            datetime_id,
-            int(row["aqi"]) if pd.notna(row["aqi"]) else None,
-            row["co"] if pd.notna(row["co"]) else None,
-            row["no"] if pd.notna(row["no"]) else None,
-            row["no2"] if pd.notna(row["no2"]) else None,
-            row["o3"] if pd.notna(row["o3"]) else None,
-            row["so2"] if pd.notna(row["so2"]) else None,
-            row["pm2_5"] if pd.notna(row["pm2_5"]) else None,
-            row["pm10"] if pd.notna(row["pm10"]) else None,
-            row["nh3"] if pd.notna(row["nh3"]) else None,
-        )
+
+        facts
     )
+
+
+    return len(facts)
 
 
 def run_load():
@@ -184,30 +280,24 @@ def run_load():
     try:
         cursor = conn.cursor()
 
-        total_rows = 0
+        print("Chargement dim_city...")
+        city_map = load_cities(cursor,df)
 
-        for _, row in df.iterrows():
-            city_id = get_or_create_city(
-                cursor,
-                row["ville"],
-                row["pays"],
-                row["latitude"],
-                row["longitude"]
-            )
+        print("Chargement dim_datetime...")
+        datetime_map = load_datetimes(cursor,df)
 
-            datetime_id = get_or_create_datetime(
-                cursor,
-                row["timestamp_utc"]
-            )
-
-            insert_fact(cursor, row, city_id, datetime_id)
-
-            total_rows += 1
+        print("Chargement fact_air_quality...")
+        total = load_facts(
+            cursor,
+            df,
+            city_map,
+            datetime_map
+        )
 
         conn.commit()
         cursor.close()
 
-        print(f"Chargement termine : {total_rows} lignes traitees.")
+        print(f"Chargement termine : {total} lignes traitees.")
         print("Data warehouse mis a jour avec succes.")
 
     except Exception as e:
